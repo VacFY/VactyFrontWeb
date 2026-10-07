@@ -15,6 +15,7 @@ import {
   type Intervalo,
 } from '../lib/lecturas';
 import { claveUsuario, guardarCache, leerCache } from '../lib/storage';
+import { nombreTermo, rangoDe } from '../lib/termo';
 
 type Preset = '8h' | '24h' | '72h' | 'personalizado';
 const HORAS: Record<Exclude<Preset, 'personalizado'>, number> = { '8h': 8, '24h': 24, '72h': 72 };
@@ -67,15 +68,23 @@ export function Historial() {
 
   const contenedor = termo?.contenedor;
   const clave = claveUsuario(dni, `historial:${contenedor}`);
+  // La enfermera solo tiene lecturas desde que vinculó el termo; el supervisor ve todo.
+  const asignadoDesde = termo?.asignadoDesde ? new Date(termo.asignadoDesde).getTime() : null;
 
   const consultar = useCallback(
-    async (desde: Date, hasta: Date) => {
+    async (pedidoDesde: Date, hasta: Date) => {
       if (!contenedor) return;
+      const desde = asignadoDesde && asignadoDesde > pedidoDesde.getTime() ? new Date(asignadoDesde) : pedidoDesde;
       control.current?.abort();
       const actual = new AbortController();
       control.current = actual;
       setCargando(true);
       setError(null);
+      if (desde >= hasta) {
+        setConsulta({ desde: desde.getTime(), hasta: hasta.getTime(), intervalos: [], incompleto: false });
+        setCargando(false);
+        return;
+      }
       try {
         const { lecturas, incompleto } = await obtenerLecturasDelRango(contenedor, desde, hasta, actual.signal);
         const nueva: Consulta = {
@@ -100,7 +109,7 @@ export function Historial() {
         if (control.current === actual) setCargando(false);
       }
     },
-    [contenedor, clave],
+    [contenedor, clave, asignadoDesde],
   );
 
   useEffect(() => {
@@ -125,9 +134,10 @@ export function Historial() {
     void consultar(new Date(hasta.getTime() - HORAS[preset] * 3_600_000), hasta);
   }
 
+  const rango = rangoDe(termo);
   const resumen = useMemo(
-    () => (consulta && termo ? resumirHistorial(consulta.intervalos, termo) : null),
-    [consulta, termo],
+    () => (consulta ? resumirHistorial(consulta.intervalos, { min: rango.minTemp, max: rango.maxTemp }) : null),
+    [consulta, rango.minTemp, rango.maxTemp],
   );
   const filas = useMemo(() => (consulta ? [...consulta.intervalos].reverse() : []), [consulta]);
 
@@ -137,10 +147,11 @@ export function Historial() {
       <>
         <Titulo>Historial de temperatura</Titulo>
         <Aviso tipo="info">
-          Primero <Link to="/termo">registra tu termo</Link> para ver su historial.
+          Primero <Link to="/termos">vincula o registra un termo</Link> para ver su historial.
         </Aviso>
       </>
     );
+  const limitado = asignadoDesde != null && consulta != null && consulta.desde <= asignadoDesde;
 
   const paginas = Math.max(1, Math.ceil(filas.length / FILAS_POR_PAGINA));
   const visibles = filas.slice(pagina * FILAS_POR_PAGINA, (pagina + 1) * FILAS_POR_PAGINA);
@@ -196,6 +207,11 @@ export function Historial() {
 
       {cargando && <p className="cargando">Consultando lecturas…</p>}
       {error && <Aviso tipo="error">{error}</Aviso>}
+      {limitado && (
+        <Aviso tipo="info">
+          Tu historial de {nombreTermo(termo)} empieza el {formatoFechaHora(asignadoDesde)}, cuando vinculaste el termo.
+        </Aviso>
+      )}
       {desdeCache && consulta && (
         <Aviso tipo="alerta">
           Sin conexión: se muestra la última consulta guardada ({formatoFechaHora(consulta.desde)} a{' '}
@@ -243,8 +259,8 @@ export function Historial() {
             {resumen.lecturasValidas > 0 ? (
               <GraficoTemperatura
                 puntos={consulta.intervalos.map((i) => ({ t: i.inicio, temperatura: i.promedio }))}
-                min={termo.min}
-                max={termo.max}
+                min={rango.minTemp}
+                max={rango.maxTemp}
                 conFecha={conFecha}
                 animar
               />
@@ -274,7 +290,7 @@ export function Historial() {
                 </thead>
                 <tbody>
                   {visibles.map((i) => {
-                    const fuera = i.cantidad > 0 && ((i.min as number) < termo.min || (i.max as number) > termo.max);
+                    const fuera = i.cantidad > 0 && ((i.min as number) < rango.minTemp || (i.max as number) > rango.maxTemp);
                     return (
                       <tr key={i.inicio} className={i.cantidad === 0 ? 'fila--sin-datos' : fuera ? 'fila--fuera' : undefined}>
                         <td>

@@ -1,94 +1,75 @@
-import type { Dispositivo, PerfilVacuna } from '../api/tipos';
-import { buscarEnCatalogo } from './vacunas';
+import type { EstadoTermo, MotivoCierre, RangoTermo, Termo } from '../api/tipos';
+import { formatoRango } from './format';
 
-export interface VacunaTermo {
-  nombre: string;
-  min: number;
-  max: number;
-  sensibleCongelacion: boolean;
+/** Rango que usa el backend si un termo no tiene lotes ni perfil. */
+export const RANGO_POR_DEFECTO: RangoTermo = {
+  minTemp: 2,
+  maxTemp: 8,
+  basedOn: 'PROFILE',
+  profileName: 'PAI estándar 2–8 °C',
+  freezeSensitive: true,
+  heatSensitive: false,
+};
+
+export function rangoDe(termo: Termo | null | undefined): RangoTermo {
+  return termo?.range ?? RANGO_POR_DEFECTO;
 }
 
-export interface Termo {
-  deviceId: string;
-  nombre: string;
-  /** Código con el que el sensor publica su telemetría (p. ej. "001"). */
-  contenedor: string;
-  vacunas: VacunaTermo[];
-  min: number;
-  max: number;
-  sensibleCongelacion: boolean;
-  profileId: number | null;
+export function nombreTermo(termo: Pick<Termo, 'nombre' | 'contenedor'>): string {
+  return termo.nombre?.trim() || `Termo ${termo.contenedor}`;
 }
 
-/** Rango que el backend usa para los contenedores sin perfil asignado. */
-export const RANGO_POR_DEFECTO = { min: 2, max: 8 };
-
-// El backend guarda el dispositivo con un texto libre ("deviceConnectionAddress") que no usa.
-// Ahí se guarda el código del contenedor y el perfil asignado, para recuperar el termo desde
-// cualquier navegador: "contenedor:001;perfil:5".
-export function codificarDireccion(contenedor: string, profileId: number): string {
-  return `contenedor:${contenedor};perfil:${profileId}`;
+/** "2,0 a 8,0 °C · según los lotes" o "… · perfil PAI estándar 2–8 °C". */
+export function textoRango(rango: RangoTermo): string {
+  const origen = rango.basedOn === 'LOTS' ? 'según los lotes' : `perfil ${rango.profileName ?? 'estándar'}`;
+  return `${formatoRango(rango.minTemp, rango.maxTemp)} · ${origen}`;
 }
 
-export function decodificarDireccion(texto: string): { contenedor: string; profileId: number | null } {
-  const c = /contenedor:([^;]+)/.exec(texto);
-  const p = /perfil:(\d+)/.exec(texto);
-  return {
-    contenedor: (c ? c[1] : texto).trim(),
-    profileId: p ? Number(p[1]) : null,
-  };
+export const TEXTO_ESTADO_TERMO: Record<EstadoTermo, string> = {
+  OK: 'En orden',
+  ALERTA: 'Con alertas',
+  SIN_DATOS: 'Sin datos',
+};
+
+export const TEXTO_MOTIVO_CIERRE: Record<MotivoCierre, string> = {
+  ENTREGADO: 'Entregado',
+  TOMADO_POR_OTRA: 'Lo tomó otra persona',
+  DESVINCULADO_POR_SUPERVISOR: 'Desvinculado por el supervisor',
+};
+
+/** Texto de un QR del termo, "vacty:<codigo>:<clave>". Devuelve null si no tiene ese formato. */
+export function separarQr(texto: string): { codigo: string; clave: string } | null {
+  const m = /^\s*vacty:([A-Za-z0-9_-]{1,32}):([A-Za-z0-9 -]{4,})\s*$/i.exec(texto);
+  return m ? { codigo: m[1], clave: m[2].trim() } : null;
 }
 
-/** Nombre del perfil en el backend: "Pentavalente + Neumococo conjugada (2 a 8 °C)". */
-export function nombrePerfil(vacunas: VacunaTermo[], min: number, max: number): string {
-  return `${vacunas.map((v) => v.nombre).join(' + ')} (${min} a ${max} °C)`;
+export function validarCodigoTermo(codigo: string): string | null {
+  const c = codigo.trim();
+  if (!c) return 'Ingresa el código del termo.';
+  if (!/^[A-Za-z0-9_-]{1,32}$/.test(c)) return 'Usa solo letras, números, guion o guion bajo (máximo 32).';
+  return null;
 }
 
-const SUFIJO_RANGO = /\s\((-?[\d.]+) a (-?[\d.]+) °C\)(\s#\d+)?$/;
-
-export function vacunasDesdePerfil(perfil: PerfilVacuna): VacunaTermo[] {
-  if (!SUFIJO_RANGO.test(perfil.name)) return [];
-  return perfil.name
-    .replace(SUFIJO_RANGO, '')
-    .split(' + ')
-    .map((n) => n.trim())
-    .filter(Boolean)
-    .map((nombre) => ({
-      nombre,
-      min: perfil.minTemp,
-      max: perfil.maxTemp,
-      sensibleCongelacion: buscarEnCatalogo(nombre)?.sensibleCongelacion ?? perfil.freezeSensitive,
-    }));
+export function validarNombreTermo(nombre: string): string | null {
+  const n = nombre.trim();
+  if (!n) return 'Ingresa un nombre para el termo.';
+  if (n.length < 2 || n.length > 60) return 'El nombre debe tener entre 2 y 60 caracteres.';
+  return null;
 }
 
-export function armarTermo(dispositivo: Dispositivo, perfiles: PerfilVacuna[]): Termo {
-  const { contenedor, profileId } = decodificarDireccion(dispositivo.deviceConnectionAddress);
-  const perfil = profileId == null ? undefined : perfiles.find((p) => p.id === profileId);
-  return {
-    deviceId: dispositivo.deviceId,
-    nombre: dispositivo.deviceName,
-    contenedor,
-    vacunas: perfil ? vacunasDesdePerfil(perfil) : [],
-    min: perfil?.minTemp ?? RANGO_POR_DEFECTO.min,
-    max: perfil?.maxTemp ?? RANGO_POR_DEFECTO.max,
-    sensibleCongelacion: perfil?.freezeSensitive ?? true,
-    profileId: perfil?.id ?? null,
-  };
-}
-
-export function mismoValor(a: number, b: number): boolean {
-  return Math.abs(a - b) < 1e-9;
+export function validarClave(clave: string): string | null {
+  const c = clave.replace(/[\s-]/g, '');
+  if (!c) return 'Ingresa la clave impresa en la etiqueta del termo.';
+  if (c.length < 4) return 'La clave está incompleta.';
+  return null;
 }
 
 export type EstadoTemperatura = 'sin_dato' | 'ok' | 'congelacion' | 'bajo' | 'alto';
 
-export function estadoTemperatura(
-  temp: number | null | undefined,
-  rango: { min: number; max: number; sensibleCongelacion: boolean },
-): EstadoTemperatura {
+export function estadoTemperatura(temp: number | null | undefined, rango: RangoTermo): EstadoTemperatura {
   if (typeof temp !== 'number' || !Number.isFinite(temp)) return 'sin_dato';
-  if (temp < rango.min) return rango.sensibleCongelacion ? 'congelacion' : 'bajo';
-  if (temp > rango.max) return 'alto';
+  if (temp < rango.minTemp) return rango.freezeSensitive ? 'congelacion' : 'bajo';
+  if (temp > rango.maxTemp) return 'alto';
   return 'ok';
 }
 

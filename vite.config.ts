@@ -4,9 +4,10 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
-  // En desarrollo el front llama a /api y /ws en su mismo origen y Vite los reenvía al backend.
-  // Así la cookie de sesión es del mismo sitio. El backend solo acepta el origen http://localhost:8000.
-  const backend = env.BACKEND_URL || 'https://vacfybackend.onrender.com';
+  // En desarrollo el front llama a /api y /ws en su mismo origen y Vite los reenvía al backend local
+  // (./mvnw spring-boot:run en VacfyBackend). Así la cookie de sesión es del mismo sitio.
+  // El backend solo acepta el origen http://localhost:8000. Para usar el de Render: BACKEND_URL=https://vacfybackend.onrender.com
+  const backend = env.BACKEND_URL || 'http://localhost:8080';
 
   return {
     plugins: [

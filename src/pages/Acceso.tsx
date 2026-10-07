@@ -10,7 +10,7 @@ import ShinyText from '../components/reactbits/ShinyText/ShinyText';
 import { Titulo } from '../components/Animados';
 import { useSesion } from '../context/SesionContext';
 import { useEnLinea } from '../lib/hooks';
-import { validarContrasena, validarDni } from '../lib/validacion';
+import { validarContrasena, validarDni, validarTextoPerfil } from '../lib/validacion';
 
 const reducirMovimiento = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 
@@ -37,7 +37,7 @@ function MarcoAcceso({ titulo, children }: { titulo: string; children: React.Rea
         <p className="acceso__frase">
           <span>Tu termo, siempre con</span>
           <RotatingText
-            texts={['temperatura en vivo', 'alarmas al instante', 'lotes bajo control', 'registro sin internet']}
+            texts={['temperatura en vivo', 'alarmas al instante', 'lotes bajo control', 'cambio de turno sin papeles']}
             mainClassName="acceso__rotativo"
             staggerFrom="last"
             staggerDuration={0.02}
@@ -181,10 +181,13 @@ export function Ingresar() {
 export function Registro() {
   const { crearCuenta } = useSesion();
   const enLinea = useEnLinea();
+  const [nombre, setNombre] = useState('');
+  const [apellido, setApellido] = useState('');
+  const [establecimiento, setEstablecimiento] = useState('');
   const [dni, setDni] = useState('');
   const [contrasena, setContrasena] = useState('');
   const [confirmacion, setConfirmacion] = useState('');
-  const [errores, setErrores] = useState<{ dni?: string | null; contrasena?: string | null; confirmacion?: string | null }>({});
+  const [errores, setErrores] = useState<Record<string, string | null>>({});
   const [error, setError] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
   const demora = useAvisoDemora(enviando);
@@ -192,6 +195,9 @@ export function Registro() {
   async function enviar(e: FormEvent) {
     e.preventDefault();
     const nuevos = {
+      nombre: validarTextoPerfil(nombre, 'nombre'),
+      apellido: validarTextoPerfil(apellido, 'apellido'),
+      establecimiento: validarTextoPerfil(establecimiento, 'establecimiento'),
       dni: validarDni(dni),
       contrasena: validarContrasena(contrasena),
       confirmacion: !confirmacion
@@ -202,10 +208,14 @@ export function Registro() {
     };
     setErrores(nuevos);
     setError(null);
-    if (nuevos.dni || nuevos.contrasena || nuevos.confirmacion) return;
+    if (Object.values(nuevos).some(Boolean)) return;
     setEnviando(true);
     try {
-      await crearCuenta(dni.trim(), contrasena);
+      await crearCuenta(dni.trim(), contrasena, {
+        nombre: nombre.trim(),
+        apellido: apellido.trim(),
+        establecimiento: establecimiento.trim(),
+      });
     } catch (err) {
       setError(mensajeDeError(err));
     } finally {
@@ -217,6 +227,23 @@ export function Registro() {
     <MarcoAcceso titulo="Crear cuenta">
       <form onSubmit={enviar} noValidate className="formulario">
         {!enLinea && <Aviso tipo="alerta">Necesitas internet para crear tu cuenta.</Aviso>}
+        <div className="fila-campos">
+          <Campo id="registro-nombre" etiqueta="Nombre" error={errores.nombre}>
+            <input {...ariaCampo('registro-nombre', errores.nombre)} value={nombre} maxLength={60} autoComplete="given-name" onChange={(e) => setNombre(e.target.value)} />
+          </Campo>
+          <Campo id="registro-apellido" etiqueta="Apellido" error={errores.apellido}>
+            <input {...ariaCampo('registro-apellido', errores.apellido)} value={apellido} maxLength={60} autoComplete="family-name" onChange={(e) => setApellido(e.target.value)} />
+          </Campo>
+        </div>
+        <Campo id="registro-establecimiento" etiqueta="Establecimiento" error={errores.establecimiento} ayuda="Por ejemplo: Posta Santa Rosa.">
+          <input
+            {...ariaCampo('registro-establecimiento', errores.establecimiento, true)}
+            value={establecimiento}
+            maxLength={60}
+            autoComplete="organization"
+            onChange={(e) => setEstablecimiento(e.target.value)}
+          />
+        </Campo>
         <CampoDni valor={dni} onChange={setDni} error={errores.dni} />
         <CampoContrasena
           id="contrasena"

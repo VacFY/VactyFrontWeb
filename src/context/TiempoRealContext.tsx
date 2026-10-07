@@ -3,12 +3,12 @@ import { ApiError, esErrorDeConexion } from '../api/http';
 import { listarAlertas, listarLecturas, marcarAlertaVista } from '../api/servicios';
 import type { Alerta, LecturaEnVivo } from '../api/tipos';
 import { WS_URL } from '../config';
-import { ordenarAlertas } from '../lib/alertas';
+import { ordenarAlertas, suenaSirena } from '../lib/alertas';
 import { esNumero } from '../lib/format';
 import { useWebSocket, type EstadoConexion } from '../lib/hooks';
 import { prepararAudio, sonarPitido } from '../lib/sonido';
 import { claveUsuario, guardar, guardarCache, leer, leerCache } from '../lib/storage';
-import { useDni } from './SesionContext';
+import { useUsuario } from './SesionContext';
 import { useTermo } from './TermoContext';
 
 export interface PuntoVivo {
@@ -20,13 +20,14 @@ export interface PuntoVivo {
 interface TiempoRealCtx {
   estadoSensor: EstadoConexion;
   estadoAlertas: EstadoConexion;
+  /** Última lectura del termo activo (en vivo o, si aún no llega, la última que conoce el servidor). */
   ultima: PuntoVivo | null;
-  /** Lecturas de los últimos 30 min para el gráfico en vivo. */
+  /** Lecturas de los últimos 30 min del termo activo, para el gráfico en vivo. */
   serie: PuntoVivo[];
-  /** Alertas del termo recibidas en vivo (abiertas y las que se cerraron en esta sesión). */
+  /** Alertas de mis termos recibidas en vivo (abiertas y las que se cerraron en esta sesión). */
   alertasEnVivo: Alerta[];
   alertasAbiertas: Alerta[];
-  /** Alerta activa (sin ver) más importante: dispara la alarma. */
+  /** Alerta activa (sin ver) más importante: muestra la banda roja. */
   alarma: Alerta | null;
   marcarVista(id: number): Promise<'enviada' | 'pendiente'>;
   pendientes: number;
@@ -45,54 +46,54 @@ function recortar(serie: PuntoVivo[]): PuntoVivo[] {
 }
 
 export function TiempoRealProvider({ children }: { children: ReactNode }) {
-  const dni = useDni();
-  const { termo } = useTermo();
+  const { dni, rol } = useUsuario();
+  const { termos, termo, recargarPronto } = useTermo();
   const contenedor = termo?.contenedor ?? null;
+  const hayTermos = termos.length > 0;
 
   const claveSerie = claveUsuario(dni, `serie:${contenedor}`);
-  const claveAlertas = claveUsuario(dni, `alertas-abiertas:${contenedor}`);
+  const claveAlertas = claveUsuario(dni, 'alertas-abiertas');
   const clavePendientes = claveUsuario(dni, 'pendientes-vista');
 
-  const [serie, setSerie] = useState<PuntoVivo[]>([]);
-  const [alertas, setAlertas] = useState<Map<number, Alerta>>(new Map());
+  const [series, setSeries] = useState<Record<string, PuntoVivo[]>>({});
+  const [alertas, setAlertas] = useState<Map<number, Alerta>>(
+    () => new Map((leerCache<Alerta[]>(claveAlertas)?.datos ?? []).map((a) => [a.id, a])),
+  );
   const [pendientes, setPendientes] = useState<number[]>(() => leer<number[]>(clavePendientes, []));
   const [sonido, setSonido] = useState(() => leer<boolean>('sonido', true));
   const pendientesRef = useRef(pendientes);
   pendientesRef.current = pendientes;
 
-  // ── Al cambiar de termo: datos guardados + últimos 30 min del servidor ──
+  const agregarPuntos = useCallback((codigo: string, puntos: PuntoVivo[]) => {
+    setSeries((s) => {
+      const porT = new Map<number, PuntoVivo>();
+      for (const p of [...(s[codigo] ?? []), ...puntos]) porT.set(p.t, p);
+      return { ...s, [codigo]: recortar([...porT.values()].sort((a, b) => a.t - b.t)) };
+    });
+  }, []);
+
+  // ── Al cambiar de termo activo: datos guardados + últimos 30 min del servidor ──
   useEffect(() => {
-    if (!contenedor) {
-      setSerie([]);
-      setAlertas(new Map());
-      return;
-    }
-    setSerie(recortar(leer<PuntoVivo[]>(claveSerie, [])));
-    const cacheAlertas = leerCache<Alerta[]>(claveAlertas)?.datos ?? [];
-    setAlertas(new Map(cacheAlertas.map((a) => [a.id, a])));
+    if (!contenedor) return;
+    agregarPuntos(contenedor, recortar(leer<PuntoVivo[]>(claveSerie, [])));
 
     const control = new AbortController();
     const hasta = new Date();
     listarLecturas(contenedor, new Date(hasta.getTime() - VENTANA_EN_VIVO_MS), hasta, control.signal)
-      .then((lecturas) => {
-        const historicas = lecturas.map((l) => ({
-          t: new Date(l.receivedAt).getTime(),
-          temperatura: l.temperatura,
-          humedad: l.humedad,
-        }));
-        setSerie((actual) => {
-          const porT = new Map<number, PuntoVivo>();
-          for (const p of [...historicas, ...actual]) porT.set(p.t, p);
-          return recortar([...porT.values()].sort((a, b) => a.t - b.t));
-        });
-      })
+      .then((lecturas) =>
+        agregarPuntos(
+          contenedor,
+          lecturas.map((l) => ({ t: new Date(l.receivedAt).getTime(), temperatura: l.temperatura, humedad: l.humedad })),
+        ),
+      )
       .catch(() => {
         // sin conexión: se queda con lo guardado en el dispositivo
       });
     return () => control.abort();
-  }, [contenedor, claveSerie, claveAlertas]);
+  }, [contenedor, claveSerie, agregarPuntos]);
 
-  // Guarda la serie cada 10 s para poder mostrarla sin internet.
+  // Guarda la serie del termo activo cada 10 s para poder mostrarla sin internet.
+  const serie = useMemo(() => (contenedor ? (series[contenedor] ?? []) : []), [series, contenedor]);
   const serieRef = useRef(serie);
   serieRef.current = serie;
   useEffect(() => {
@@ -101,23 +102,24 @@ export function TiempoRealProvider({ children }: { children: ReactNode }) {
     return () => window.clearInterval(id);
   }, [contenedor, claveSerie]);
 
-  // ── /ws/device: temperatura en vivo ──
+  // ── /ws/device: el backend solo envía las lecturas de los termos que puedo ver ──
   const alLeer = useCallback(
     (datos: unknown) => {
       const l = datos as LecturaEnVivo;
-      if (!contenedor || !l || l.contenedor !== contenedor) return;
-      const punto: PuntoVivo = {
-        t: Date.now(),
-        temperatura: esNumero(l.temperatura) ? l.temperatura : null,
-        humedad: esNumero(l.humedad) ? l.humedad : null,
-      };
-      setSerie((s) => recortar([...s, punto]));
+      if (!l || typeof l.contenedor !== 'string') return;
+      agregarPuntos(l.contenedor, [
+        {
+          t: Date.now(),
+          temperatura: esNumero(l.temperatura) ? l.temperatura : null,
+          humedad: esNumero(l.humedad) ? l.humedad : null,
+        },
+      ]);
     },
-    [contenedor],
+    [agregarPuntos],
   );
-  const estadoSensor = useWebSocket(contenedor ? `${WS_URL}/ws/device` : null, alLeer);
+  const estadoSensor = useWebSocket(hayTermos ? `${WS_URL}/ws/device` : null, alLeer);
 
-  // ── /ws/alerts: alertas en vivo ──
+  // ── /ws/alerts: alertas y avisos de asignación ──
   const conPendientes = useCallback(
     (a: Alerta): Alerta =>
       a.status === 'ACTIVE' && pendientesRef.current.includes(a.id)
@@ -128,11 +130,18 @@ export function TiempoRealProvider({ children }: { children: ReactNode }) {
 
   const alRecibirAlerta = useCallback(
     (datos: unknown) => {
+      if (!datos || typeof datos !== 'object') return;
+      // Un mensaje con `tipo` es un aviso (p. ej. ASIGNACION_CAMBIADA); uno con `id`, una alerta.
+      if ('tipo' in datos) {
+        recargarPronto();
+        return;
+      }
       const a = datos as Alerta;
-      if (!contenedor || !a || typeof a.id !== 'number' || a.contenedor !== contenedor) return;
+      if (typeof a.id !== 'number') return;
       setAlertas((m) => new Map(m).set(a.id, conPendientes(a)));
+      recargarPronto();
     },
-    [contenedor, conPendientes],
+    [conPendientes, recargarPronto],
   );
 
   const actualizarPendientes = useCallback(
@@ -159,7 +168,8 @@ export function TiempoRealProvider({ children }: { children: ReactNode }) {
           actualizarPendientes((p) => p.filter((x) => x !== id));
         } catch (e) {
           if (esErrorDeConexion(e)) break;
-          if (e instanceof ApiError && e.status === 404) actualizarPendientes((p) => p.filter((x) => x !== id));
+          if (e instanceof ApiError && (e.status === 404 || e.status === 403))
+            actualizarPendientes((p) => p.filter((x) => x !== id));
           else break;
         }
       }
@@ -171,9 +181,8 @@ export function TiempoRealProvider({ children }: { children: ReactNode }) {
   // Foto de las alertas abiertas por REST. Así la alarma suena aunque el WebSocket de alertas
   // no esté disponible, y se descartan las que se cerraron mientras no había conexión.
   const sincronizarAbiertas = useCallback(async () => {
-    if (!contenedor) return;
     try {
-      const abiertas = await listarAlertas('OPEN', contenedor);
+      const abiertas = await listarAlertas('OPEN');
       setAlertas((m) => {
         const nuevo = new Map<number, Alerta>();
         for (const a of m.values()) if (a.status === 'RESOLVED') nuevo.set(a.id, a);
@@ -183,13 +192,13 @@ export function TiempoRealProvider({ children }: { children: ReactNode }) {
     } catch {
       // sin conexión: se mantiene lo guardado en el dispositivo
     }
-  }, [contenedor, conPendientes]);
+  }, [conPendientes]);
 
   const alConectarAlertas = useCallback(() => {
     void enviarPendientes().then(sincronizarAbiertas);
   }, [enviarPendientes, sincronizarAbiertas]);
 
-  const estadoAlertas = useWebSocket(contenedor ? `${WS_URL}/ws/alerts` : null, alRecibirAlerta, alConectarAlertas);
+  const estadoAlertas = useWebSocket(`${WS_URL}/ws/alerts`, alRecibirAlerta, alConectarAlertas);
 
   useEffect(() => {
     void sincronizarAbiertas();
@@ -202,12 +211,17 @@ export function TiempoRealProvider({ children }: { children: ReactNode }) {
     };
   }, [enviarPendientes, sincronizarAbiertas]);
 
-  const alertasEnVivo = useMemo(() => ordenarAlertas([...alertas.values()]), [alertas]);
+  // La enfermera solo ve las alertas de los termos que tiene ahora (si se lo quitan, desaparecen).
+  const alertasEnVivo = useMemo(() => {
+    const mias = new Set(termos.map((t) => t.contenedor));
+    const todas = [...alertas.values()];
+    return ordenarAlertas(rol === 'SUPERVISOR' ? todas : todas.filter((a) => mias.has(a.contenedor)));
+  }, [alertas, termos, rol]);
   const alertasAbiertas = useMemo(() => alertasEnVivo.filter((a) => a.status !== 'RESOLVED'), [alertasEnVivo]);
 
   useEffect(() => {
-    if (contenedor) guardarCache(claveAlertas, alertasAbiertas);
-  }, [contenedor, claveAlertas, alertasAbiertas]);
+    guardarCache(claveAlertas, alertasAbiertas);
+  }, [claveAlertas, alertasAbiertas]);
 
   const marcarVista = useCallback(
     async (id: number): Promise<'enviada' | 'pendiente'> => {
@@ -228,8 +242,10 @@ export function TiempoRealProvider({ children }: { children: ReactNode }) {
     [actualizarPendientes],
   );
 
-  // ── Alarma local: sonido, vibración y título de la pestaña ──
-  const alarma = alertasAbiertas.find((a) => a.status === 'ACTIVE') ?? null;
+  // ── Alarma local: banda en todas las pantallas; sonido y vibración solo por temperatura o sensor ──
+  const activas = alertasAbiertas.filter((a) => a.status === 'ACTIVE');
+  const alarma = activas.find(suenaSirena) ?? activas[0] ?? null;
+  const conSirena = alarma != null && suenaSirena(alarma);
 
   useEffect(() => {
     const desbloquear = () => prepararAudio();
@@ -242,7 +258,7 @@ export function TiempoRealProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!alarma) return;
+    if (!alarma || !conSirena) return;
     navigator.vibrate?.([400, 200, 400]);
     const tituloOriginal = document.title;
     document.title = '⚠ ALERTA — VacTy';
@@ -253,7 +269,7 @@ export function TiempoRealProvider({ children }: { children: ReactNode }) {
       window.clearInterval(id);
       document.title = tituloOriginal;
     };
-  }, [alarma?.id, sonido]);
+  }, [alarma?.id, conSirena, sonido]);
 
   const cambiarSonido = useCallback((activo: boolean) => {
     if (activo) prepararAudio();
@@ -261,7 +277,16 @@ export function TiempoRealProvider({ children }: { children: ReactNode }) {
     guardar('sonido', activo);
   }, []);
 
-  const ultima = serie.length ? serie[serie.length - 1] : null;
+  // Si aún no llega nada en vivo, se usa la última lectura que conoce el servidor.
+  const enVivo = serie.length ? serie[serie.length - 1] : null;
+  const leidaEn = termo?.lastReadingAt ?? null;
+  const tempServidor = termo?.temperatura ?? null;
+  const humServidor = termo?.humedad ?? null;
+  const delServidor = useMemo<PuntoVivo | null>(
+    () => (leidaEn ? { t: new Date(leidaEn).getTime(), temperatura: tempServidor, humedad: humServidor } : null),
+    [leidaEn, tempServidor, humServidor],
+  );
+  const ultima = enVivo && (!delServidor || enVivo.t >= delServidor.t) ? enVivo : delServidor;
 
   const valor = useMemo<TiempoRealCtx>(
     () => ({

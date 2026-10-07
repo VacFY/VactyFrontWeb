@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { esErrorDeConexion, mensajeDeError } from '../api/http';
-import { listarAlertas } from '../api/servicios';
+import { cerrarLote, listarAlertas } from '../api/servicios';
 import type { Alerta, FiltroAlertas } from '../api/tipos';
 import { Aparecer, Numero, Titulo } from '../components/Animados';
-import { Aviso } from '../components/Campo';
+import { Aviso, Campo } from '../components/Campo';
+import HoldButton from '../components/reactbits/HoldButton/HoldButton';
 import { Leyenda } from '../components/Siglas';
 import { useDni } from '../context/SesionContext';
 import { useTermo } from '../context/TermoContext';
@@ -12,27 +13,25 @@ import { useTiempoReal } from '../context/TiempoRealContext';
 import {
   cumpleFiltro,
   guiaAlerta,
+  iconoTipo,
   ordenarAlertas,
   TEXTO_ESTADO_ALERTA,
   TEXTO_FILTRO_ALERTAS,
-  TEXTO_TIPO_ALERTA,
+  textoTipo,
 } from '../lib/alertas';
-import { formatoFechaHora, formatoTemp } from '../lib/format';
+import { formatoFecha, formatoFechaHora, formatoTemp } from '../lib/format';
 import { siglasEnTexto } from '../lib/siglas';
 import { claveUsuario, guardarCache, leerCache } from '../lib/storage';
+import { nombreTermo, rangoDe } from '../lib/termo';
 
-const ICONO_TIPO: Record<Alerta['type'], string> = {
-  OUT_OF_RANGE: '🌡',
-  RAPID_CHANGE: '↕',
-  SENSOR_OFFLINE: '⦸',
-  INVALID_READING: '?',
-};
-
-function ItemAlerta({ alerta, rangoMin, orden }: { alerta: Alerta; rangoMin: number; orden: number }) {
+function ItemAlerta({ alerta, orden, onCambio }: { alerta: Alerta; orden: number; onCambio(): void }) {
   const { marcarVista } = useTiempoReal();
+  const { termos, recargarPronto } = useTermo();
   const [enviando, setEnviando] = useState(false);
-  const [mensaje, setMensaje] = useState<{ tipo: 'error' | 'info'; texto: string } | null>(null);
+  const [mensaje, setMensaje] = useState<{ tipo: 'error' | 'info' | 'exito'; texto: string } | null>(null);
   const critica = alerta.severity === 'CRITICAL';
+  const termo = termos.find((t) => t.contenedor === alerta.contenedor);
+  const guia = guiaAlerta(alerta, rangoDe(termo).minTemp);
 
   async function marcar() {
     setEnviando(true);
@@ -47,6 +46,19 @@ function ItemAlerta({ alerta, rangoMin, orden }: { alerta: Alerta; rangoMin: num
     }
   }
 
+  async function descartar() {
+    if (alerta.lotId == null) return;
+    setMensaje(null);
+    try {
+      const lote = await cerrarLote(alerta.lotId, 'DISCARDED', alerta.type === 'LOT_EXPIRED' ? 'Vencido' : 'Descartado desde la alerta');
+      setMensaje({ tipo: 'exito', texto: `Lote ${lote.lotNumber} de ${lote.vaccine.name} descartado.` });
+      recargarPronto();
+      onCambio();
+    } catch (e) {
+      setMensaje({ tipo: 'error', texto: mensajeDeError(e) });
+    }
+  }
+
   return (
     <Aparecer
       as="li"
@@ -54,16 +66,27 @@ function ItemAlerta({ alerta, rangoMin, orden }: { alerta: Alerta; rangoMin: num
       className={`evento evento--${alerta.status.toLowerCase()}${critica ? ' evento--critica' : ''}`}
     >
       <span className="evento__nodo" aria-hidden="true">
-        {ICONO_TIPO[alerta.type]}
+        {iconoTipo(alerta.type)}
       </span>
       <div className="evento__cuerpo">
         <p className="evento__hora">
           <time dateTime={alerta.startedAt}>{formatoFechaHora(alerta.startedAt)}</time>
           <span className={`chip ${critica ? 'chip--peligro' : 'chip--alerta'}`}>{critica ? 'Crítica' : 'Advertencia'}</span>
           <span className={`chip chip--estado-${alerta.status.toLowerCase()}`}>{TEXTO_ESTADO_ALERTA[alerta.status]}</span>
+          <span className="evento__termo">{termo ? nombreTermo(termo) : `Termo ${alerta.contenedor}`}</span>
         </p>
-        <h2 className="evento__titulo">{TEXTO_TIPO_ALERTA[alerta.type]}</h2>
+        <h2 className="evento__titulo">{alerta.title || textoTipo(alerta.type)}</h2>
         <p className="evento__mensaje">{alerta.message}</p>
+
+        {alerta.affectedLots?.length > 0 && (
+          <ul className="evento__lotes" aria-label="Lotes afectados">
+            {alerta.affectedLots.map((l) => (
+              <li key={l.lotId}>
+                <strong>{l.vaccine}</strong> lote {l.lotNumber} · vence el {formatoFecha(l.expiryDate)}
+              </li>
+            ))}
+          </ul>
+        )}
 
         {(alerta.triggerValue != null || alerta.minValue != null || alerta.maxValue != null) && (
           <p className="evento__cifras">
@@ -88,9 +111,9 @@ function ItemAlerta({ alerta, rangoMin, orden }: { alerta: Alerta; rangoMin: num
           </p>
         )}
 
-        {alerta.status !== 'RESOLVED' && (
+        {alerta.status !== 'RESOLVED' && guia && (
           <p className="evento__guia">
-            <strong>Qué hacer:</strong> {guiaAlerta(alerta, rangoMin)}
+            <strong>Qué hacer:</strong> {guia}
           </p>
         )}
 
@@ -102,10 +125,31 @@ function ItemAlerta({ alerta, rangoMin, orden }: { alerta: Alerta; rangoMin: num
         )}
         {alerta.resolutionMessage && <p className="evento__resolucion">✓ {alerta.resolutionMessage}</p>}
         {mensaje && <Aviso tipo={mensaje.tipo}>{mensaje.texto}</Aviso>}
-        {alerta.status === 'ACTIVE' && (
-          <button type="button" className="boton boton--primario" onClick={marcar} disabled={enviando}>
-            {enviando ? 'Enviando…' : 'Marcar como vista'}
-          </button>
+        {alerta.status !== 'RESOLVED' && (
+          <div className="acciones">
+            {alerta.status === 'ACTIVE' && (
+              <button type="button" className="boton boton--primario" onClick={marcar} disabled={enviando}>
+                {enviando ? 'Enviando…' : 'Marcar como vista'}
+              </button>
+            )}
+            {alerta.lotId != null && (
+              <HoldButton
+                size="md"
+                radius={12}
+                holdTime={1200}
+                backgroundColor="#ffffff"
+                fillColor="#b42318"
+                textColor="#390f07"
+                fillTextColor="#ffffff"
+                doneLabel="Descartado"
+                resetAfter={1500}
+                onHold={() => void descartar()}
+                className="boton-mantener"
+              >
+                Mantén para descartar el lote
+              </HoldButton>
+            )}
+          </div>
         )}
       </div>
     </Aparecer>
@@ -114,23 +158,22 @@ function ItemAlerta({ alerta, rangoMin, orden }: { alerta: Alerta; rangoMin: num
 
 export function Alertas() {
   const dni = useDni();
-  const { termo, cargando: cargandoTermo } = useTermo();
+  const { termos } = useTermo();
   const { alertasEnVivo } = useTiempoReal();
   const [filtro, setFiltro] = useState<FiltroAlertas>('OPEN');
+  const [contenedor, setContenedor] = useState('');
   const [lista, setLista] = useState<Alerta[]>([]);
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [desdeCache, setDesdeCache] = useState<string | null>(null);
 
-  const contenedor = termo?.contenedor;
-  const clave = claveUsuario(dni, `alertas:${contenedor}:${filtro}`);
+  const clave = claveUsuario(dni, `alertas:${contenedor || 'todos'}:${filtro}`);
 
   const cargar = useCallback(async () => {
-    if (!contenedor) return;
     setCargando(true);
     setError(null);
     try {
-      const datos = await listarAlertas(filtro, contenedor);
+      const datos = await listarAlertas(filtro, contenedor || undefined);
       setLista(datos);
       setDesdeCache(null);
       guardarCache(clave, datos);
@@ -161,21 +204,9 @@ export function Alertas() {
   // Lo que llega en vivo reemplaza a lo consultado (es más reciente).
   const alertas = useMemo(() => {
     const porId = new Map(lista.map((a) => [a.id, a]));
-    for (const a of alertasEnVivo) porId.set(a.id, a);
+    for (const a of alertasEnVivo) if (!contenedor || a.contenedor === contenedor) porId.set(a.id, a);
     return ordenarAlertas([...porId.values()].filter((a) => cumpleFiltro(a, filtro)));
-  }, [lista, alertasEnVivo, filtro]);
-
-  if (cargandoTermo && !termo) return <p className="cargando">Cargando…</p>;
-
-  if (!termo)
-    return (
-      <>
-        <Titulo>Alertas</Titulo>
-        <Aviso tipo="info">
-          Primero <Link to="/termo">registra tu termo</Link> para ver sus alertas.
-        </Aviso>
-      </>
-    );
+  }, [lista, alertasEnVivo, filtro, contenedor]);
 
   const activas = alertas.filter((a) => a.status === 'ACTIVE').length;
   const criticas = alertas.filter((a) => a.severity === 'CRITICAL' && a.status !== 'RESOLVED').length;
@@ -185,8 +216,14 @@ export function Alertas() {
     <>
       <Titulo>Alertas</Titulo>
       <p className="subtitulo">
-        Lo que pasó con la temperatura del termo {termo.nombre}. Rango seguro: {termo.min} a {termo.max} °C.
+        Lo que pasó con la temperatura y los lotes de {termos.length === 1 ? nombreTermo(termos[0]) : 'tus termos'}.
       </p>
+
+      {termos.length === 0 && (
+        <Aviso tipo="info">
+          Aún no tienes termos. <Link to="/termos">Ve a Termos</Link> para vincular o registrar uno.
+        </Aviso>
+      )}
 
       <div className="cifras cifras--cabecera">
         <div className="cifra cifra--peligro">
@@ -224,6 +261,18 @@ export function Alertas() {
             </button>
           ))}
         </div>
+        {termos.length > 1 && (
+          <Campo id="filtro-termo" etiqueta="Termo">
+            <select id="filtro-termo" value={contenedor} onChange={(e) => setContenedor(e.target.value)}>
+              <option value="">Todos</option>
+              {termos.map((t) => (
+                <option key={t.contenedor} value={t.contenedor}>
+                  {nombreTermo(t)} ({t.contenedor})
+                </option>
+              ))}
+            </select>
+          </Campo>
+        )}
         <button type="button" className="boton boton--borde boton--chico" onClick={() => void cargar()} disabled={cargando}>
           <span className={cargando ? 'girando' : undefined} aria-hidden="true">
             ↻
@@ -245,7 +294,7 @@ export function Alertas() {
       )}
       <ol className="linea-tiempo">
         {alertas.map((a, i) => (
-          <ItemAlerta key={a.id} alerta={a} rangoMin={termo.min} orden={i} />
+          <ItemAlerta key={a.id} alerta={a} orden={i} onCambio={() => void cargar()} />
         ))}
       </ol>
       {alertas.length >= 200 && <p className="campo__ayuda">Se muestran las 200 alertas más recientes.</p>}

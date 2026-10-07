@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { pedirTicketWs } from '../api/servicios';
 
 export function useEnLinea(): boolean {
   const [enLinea, setEnLinea] = useState(() => navigator.onLine);
@@ -28,8 +29,13 @@ export function useAhora(cadaMs = 1000): number {
 export type EstadoConexion = 'conectando' | 'conectado' | 'desconectado';
 
 /**
- * WebSocket que se reconecta solo (espera creciente hasta 30 s) y de inmediato
+ * WebSocket con sesión que se reconecta solo (espera creciente hasta 30 s) y de inmediato
  * cuando vuelve internet. Con url = null no se conecta.
+ *
+ * Antes de cada conexión pide un ticket de un solo uso (POST /authentication/ws-ticket) y lo envía
+ * en `?ticket=`: en producción la API pasa por el proxy del hosting y la cookie de sesión no viaja
+ * en el WebSocket, que va directo al backend. Si la sesión venció, ese POST responde 401 y la app
+ * vuelve al inicio de sesión.
  */
 export function useWebSocket(
   url: string | null,
@@ -48,45 +54,62 @@ export function useWebSocket(
       return;
     }
     let ws: WebSocket | null = null;
+    let pidiendoTicket = false;
     let espera = 1000;
     let temporizador: number | undefined;
     let cerrado = false;
 
-    const conectar = () => {
+    const reintentar = () => {
+      setEstado('desconectado');
+      temporizador = window.setTimeout(() => void conectar(), espera);
+      espera = Math.min(espera * 2, 30_000);
+    };
+
+    const conectar = async () => {
       window.clearTimeout(temporizador);
-      if (cerrado) return;
+      if (cerrado || ws || pidiendoTicket) return;
       setEstado('conectando');
-      ws = new WebSocket(url);
-      ws.onopen = () => {
+      pidiendoTicket = true;
+      let ticket: string;
+      try {
+        ticket = (await pedirTicketWs()).ticket;
+      } catch {
+        pidiendoTicket = false;
+        if (!cerrado) reintentar();
+        return;
+      }
+      pidiendoTicket = false;
+      if (cerrado) return;
+
+      const actual = new WebSocket(`${url}?ticket=${encodeURIComponent(ticket)}`);
+      ws = actual;
+      actual.onopen = () => {
         espera = 1000;
         setEstado('conectado');
         alConectarRef.current?.();
       };
-      ws.onmessage = (e) => {
+      actual.onmessage = (e) => {
         try {
           alMensajeRef.current(JSON.parse(String(e.data)));
         } catch {
           // mensaje que no es JSON (p. ej. "nan" de firmware antiguo): se ignora
         }
       };
-      ws.onclose = () => {
-        ws = null;
-        if (cerrado) return;
-        setEstado('desconectado');
-        temporizador = window.setTimeout(conectar, espera);
-        espera = Math.min(espera * 2, 30_000);
+      actual.onclose = () => {
+        if (ws === actual) ws = null;
+        if (!cerrado) reintentar();
       };
-      ws.onerror = () => ws?.close();
+      actual.onerror = () => actual.close();
     };
 
     const alVolverInternet = () => {
-      if (!ws) {
+      if (!ws && !pidiendoTicket) {
         espera = 1000;
-        conectar();
+        void conectar();
       }
     };
 
-    conectar();
+    void conectar();
     window.addEventListener('online', alVolverInternet);
     return () => {
       cerrado = true;

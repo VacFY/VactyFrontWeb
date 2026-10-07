@@ -1,3 +1,4 @@
+import type { LoteApi } from '../api/tipos';
 import { diasHasta, fechaLocal, hoyISO } from './format';
 
 export type EtapaVvm = 1 | 2 | 3 | 4;
@@ -56,18 +57,17 @@ export interface Verificacion {
   motivos: string[];
 }
 
-export interface Lote {
-  id: string;
-  vacuna: string;
-  numero: string;
-  /** "AAAA-MM-DD". */
-  vencimiento: string;
-  frascos: number;
-  etapaVvm: EtapaVvm;
+/**
+ * Lo que el backend no guarda: VVM, foto y verificaciones antes de vacunar.
+ * Vive en este dispositivo, indexado por el id del lote del backend.
+ */
+export interface DatosLocalesLote {
+  etapaVvm: EtapaVvm | null;
   fotoVvm: string | null;
-  registradoEn: string;
   verificaciones: Verificacion[];
 }
+
+export const SIN_DATOS_LOCALES: DatosLocalesLote = { etapaVvm: null, fotoVvm: null, verificaciones: [] };
 
 export type EstadoLote = 'vencido' | 'no_apto' | 'por_vencer' | 'vigente';
 
@@ -78,55 +78,69 @@ export const TEXTO_ESTADO_LOTE: Record<EstadoLote, string> = {
   vigente: 'Vigente',
 };
 
-export function ultimaVerificacion(lote: Lote): Verificacion | undefined {
-  return lote.verificaciones[lote.verificaciones.length - 1];
+export function ultimaVerificacion(local: DatosLocalesLote): Verificacion | undefined {
+  return local.verificaciones[local.verificaciones.length - 1];
 }
 
 /** Etapa del VVM más reciente: la de la última verificación o, si no hay, la del registro. */
-export function etapaActual(lote: Lote): EtapaVvm {
-  return ultimaVerificacion(lote)?.etapaVvm ?? lote.etapaVvm;
+export function etapaActual(local: DatosLocalesLote): EtapaVvm | null {
+  return ultimaVerificacion(local)?.etapaVvm ?? local.etapaVvm;
 }
 
-export function estadoLote(lote: Lote, umbralDias: number, hoy: string = hoyISO()): EstadoLote {
-  const dias = diasHasta(lote.vencimiento, hoy);
-  if (dias < 0) return 'vencido';
-  if (!infoVvm(etapaActual(lote)).usable) return 'no_apto';
-  if (dias <= umbralDias) return 'por_vencer';
+export function vencido(lote: Pick<LoteApi, 'status' | 'expiryDate'>, hoy: string = hoyISO()): boolean {
+  return lote.status === 'EXPIRED' || diasHasta(lote.expiryDate, hoy) < 0;
+}
+
+export function estadoLote(
+  lote: Pick<LoteApi, 'status' | 'expiryDate'>,
+  local: DatosLocalesLote,
+  umbralDias: number,
+  hoy: string = hoyISO(),
+): EstadoLote {
+  if (vencido(lote, hoy)) return 'vencido';
+  const etapa = etapaActual(local);
+  if (etapa != null && !infoVvm(etapa).usable) return 'no_apto';
+  if (diasHasta(lote.expiryDate, hoy) <= umbralDias) return 'por_vencer';
   return 'vigente';
 }
 
-/** FEFO: primero lo que vence antes; a igual fecha, primero el VVM más avanzado. */
-export function ordenarFefo(lotes: Lote[]): Lote[] {
-  return [...lotes].sort(
-    (a, b) => a.vencimiento.localeCompare(b.vencimiento) || etapaActual(b) - etapaActual(a) || a.numero.localeCompare(b.numero),
-  );
+/** FEFO: primero lo que vence antes. */
+export function ordenarFefo<T extends Pick<LoteApi, 'expiryDate' | 'lotNumber'>>(lotes: T[]): T[] {
+  return [...lotes].sort((a, b) => a.expiryDate.localeCompare(b.expiryDate) || a.lotNumber.localeCompare(b.lotNumber));
 }
 
 /** Por cada vacuna, el lote apto que se debe usar primero. */
-export function lotesUsarPrimero(lotes: Lote[], hoy: string = hoyISO()): Set<string> {
-  const ids = new Set<string>();
-  const vistas = new Set<string>();
+export function lotesUsarPrimero(
+  lotes: LoteApi[],
+  locales: Record<number, DatosLocalesLote>,
+  hoy: string = hoyISO(),
+): Set<number> {
+  const ids = new Set<number>();
+  const vistas = new Set<number>();
   for (const lote of ordenarFefo(lotes)) {
-    if (vistas.has(lote.vacuna)) continue;
-    if (diasHasta(lote.vencimiento, hoy) < 0 || !infoVvm(etapaActual(lote)).usable) continue;
-    vistas.add(lote.vacuna);
+    if (vistas.has(lote.vaccine.id)) continue;
+    if (lote.status !== 'ACTIVE' || vencido(lote, hoy)) continue;
+    const etapa = etapaActual(locales[lote.id] ?? SIN_DATOS_LOCALES);
+    if (etapa != null && !infoVvm(etapa).usable) continue;
+    vistas.add(lote.vaccine.id);
     ids.add(lote.id);
   }
   return ids;
 }
 
-export function verificarLote(lote: Lote, etapaVvm: EtapaVvm, hoy: string = hoyISO()): Verificacion {
+export function verificarLote(lote: Pick<LoteApi, 'status' | 'expiryDate'>, etapaVvm: EtapaVvm, hoy: string = hoyISO()): Verificacion {
   const motivos: string[] = [];
-  if (diasHasta(lote.vencimiento, hoy) < 0) motivos.push('El lote está vencido.');
+  if (vencido(lote, hoy)) motivos.push('El lote está vencido.');
   if (!infoVvm(etapaVvm).usable) motivos.push(`VVM en etapa ${etapaVvm}: ${infoVvm(etapaVvm).indicacion}`);
   return { fecha: new Date().toISOString(), etapaVvm, apto: motivos.length === 0, motivos };
 }
 
 export interface DatosLote {
-  vacuna: string;
+  vacunaId: string;
   numero: string;
   vencimiento: string;
   frascos: string;
+  dosis: string;
   etapaVvm: EtapaVvm | null;
 }
 
@@ -136,33 +150,29 @@ export function normalizarNumeroLote(numero: string): string {
   return numero.trim().toUpperCase();
 }
 
-export function validarLote(
-  datos: DatosLote,
-  contexto: { vacunasTermo: string[]; lotes: Lote[]; hoy?: string },
-): ErroresLote {
-  const hoy = contexto.hoy ?? hoyISO();
+/** Validación previa al envío; el backend vuelve a validar (rango común del termo, lote repetido, GTIN). */
+export function validarLote(datos: DatosLote, hoy: string = hoyISO()): ErroresLote {
   const e: ErroresLote = {};
 
-  if (!datos.vacuna) e.vacuna = 'Elige la vacuna del lote.';
-  else if (!contexto.vacunasTermo.includes(datos.vacuna))
-    e.vacuna = 'Esa vacuna no está registrada en tu termo. Agrégala primero en «Mi termo».';
+  if (!datos.vacunaId) e.vacunaId = 'Elige la vacuna del lote.';
 
   const numero = normalizarNumeroLote(datos.numero);
   if (!numero) e.numero = 'Ingresa el número de lote impreso en la etiqueta.';
-  else if (!/^[A-Z0-9-]{3,20}$/.test(numero)) e.numero = 'Usa de 3 a 20 letras, números o guiones.';
-  else if (contexto.lotes.some((l) => l.vacuna === datos.vacuna && l.numero === numero))
-    e.numero = 'Ese lote de esta vacuna ya está registrado.';
+  else if (numero.length > 20) e.numero = 'El número de lote admite máximo 20 caracteres.';
 
   if (!datos.vencimiento) e.vencimiento = 'Ingresa la fecha de vencimiento.';
   else if (Number.isNaN(fechaLocal(datos.vencimiento).getTime())) e.vencimiento = 'La fecha no es válida.';
-  else if (diasHasta(datos.vencimiento, hoy) < 0)
-    e.vencimiento = 'El lote está vencido: no debe salir en el termo.';
+  else if (diasHasta(datos.vencimiento, hoy) < 0) e.vencimiento = 'El lote está vencido: no debe salir en el termo.';
   else if (diasHasta(datos.vencimiento, hoy) > 365 * 10) e.vencimiento = 'Revisa la fecha: está a más de 10 años.';
 
   const frascos = datos.frascos.trim();
   if (!frascos) e.frascos = 'Ingresa la cantidad de frascos.';
   else if (!/^\d+$/.test(frascos) || Number(frascos) < 1 || Number(frascos) > 500)
     e.frascos = 'Debe ser un número entero entre 1 y 500.';
+
+  const dosis = datos.dosis.trim();
+  if (dosis && (!/^\d+$/.test(dosis) || Number(dosis) < 1 || Number(dosis) > 10000))
+    e.dosis = 'Debe ser un número entero mayor que 0.';
 
   if (datos.etapaVvm == null) e.etapaVvm = 'Indica cómo se ve el VVM del frasco.';
   else if (!infoVvm(datos.etapaVvm).usable)

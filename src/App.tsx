@@ -5,10 +5,11 @@ import { TermoProvider } from './context/TermoContext';
 import { TiempoRealProvider } from './context/TiempoRealContext';
 import { Ingresar, Registro } from './pages/Acceso';
 import { Alertas } from './pages/Alertas';
+import { Cuenta } from './pages/Cuenta';
 import { EnVivo } from './pages/EnVivo';
 import { Historial } from './pages/Historial';
 import { Lotes } from './pages/Lotes';
-import { MiTermo } from './pages/MiTermo';
+import { Termos } from './pages/Termos';
 
 function PantallaCarga() {
   return (
@@ -23,9 +24,9 @@ function SoloConSesion() {
   const { sesion } = useSesion();
   if (sesion.tipo === 'cargando') return <PantallaCarga />;
   if (sesion.tipo === 'anonimo') return <Navigate to="/ingresar" replace />;
-  // key: al cambiar de cuenta se reinician los datos en memoria.
+  // key: al cambiar de cuenta o de rol se reinician los datos en memoria.
   return (
-    <TermoProvider key={sesion.dni}>
+    <TermoProvider key={`${sesion.dni}:${sesion.rol}`}>
       <TiempoRealProvider>
         <Outlet />
       </TiempoRealProvider>
@@ -37,8 +38,9 @@ function SoloSinSesion() {
   const { sesion } = useSesion();
   const { pathname } = useLocation();
   if (sesion.tipo === 'cargando') return <PantallaCarga />;
-  // Quien acaba de crear su cuenta va directo a registrar su termo.
-  if (sesion.tipo === 'autenticado') return <Navigate to={pathname === '/registro' ? '/termo' : '/'} replace />;
+  // El supervisor empieza en la lista de termos; quien acaba de crear su cuenta, en vincular su termo.
+  if (sesion.tipo === 'autenticado')
+    return <Navigate to={sesion.rol === 'SUPERVISOR' || pathname === '/registro' ? '/termos' : '/'} replace />;
   return <Outlet />;
 }
 
@@ -57,7 +59,9 @@ export function App() {
               <Route path="alertas" element={<Alertas />} />
               <Route path="historial" element={<Historial />} />
               <Route path="lotes" element={<Lotes />} />
-              <Route path="termo" element={<MiTermo />} />
+              <Route path="termos" element={<Termos />} />
+              <Route path="cuenta" element={<Cuenta />} />
+              <Route path="termo" element={<Navigate to="/termos" replace />} />
             </Route>
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

@@ -5,15 +5,20 @@ import { GraficoTemperatura } from '../components/GraficoTemperatura';
 import Aurora from '../components/reactbits/Aurora/Aurora';
 import ShinyText from '../components/reactbits/ShinyText/ShinyText';
 import { DIAS_POR_VENCER, MS_SENSOR_SIN_SENAL } from '../config';
-import { useDni } from '../context/SesionContext';
+import { useEsSupervisor } from '../context/SesionContext';
 import { useTermo } from '../context/TermoContext';
 import { useTiempoReal } from '../context/TiempoRealContext';
-import { TEXTO_ESTADO_ALERTA, TEXTO_TIPO_ALERTA } from '../lib/alertas';
-import { esNumero, formatoFechaHora, formatoHumedad, formatoRango, formatoTemp, haceCuanto } from '../lib/format';
+import { TEXTO_ESTADO_ALERTA, textoTipo } from '../lib/alertas';
+import { esNumero, formatoFecha, formatoFechaHora, formatoHumedad, formatoRango, formatoTemp, haceCuanto } from '../lib/format';
 import { useAhora } from '../lib/hooks';
-import { estadoLote } from '../lib/lotes';
-import { estadoTemperatura, TEXTO_ESTADO_TEMPERATURA, type EstadoTemperatura } from '../lib/termo';
-import { useLotes } from '../lib/useLotes';
+import {
+  estadoTemperatura,
+  nombreTermo,
+  rangoDe,
+  TEXTO_ESTADO_TEMPERATURA,
+  textoRango,
+  type EstadoTemperatura,
+} from '../lib/termo';
 
 const TEXTO_CONEXION = {
   conectado: 'Recibiendo en vivo',
@@ -57,32 +62,45 @@ function BarraRango({ temp, min, max }: { temp: number | null | undefined; min: 
 }
 
 export function EnVivo() {
-  const dni = useDni();
-  const { termo, cargando } = useTermo();
+  const supervisor = useEsSupervisor();
+  const { termo, cargando, error, recargar } = useTermo();
   const { ultima, serie, estadoSensor, alertasAbiertas } = useTiempoReal();
-  const { lotes } = useLotes(dni);
   const ahora = useAhora(1000);
 
   if (cargando && !termo) return <p className="cargando">Cargando…</p>;
 
+  if (!termo && error)
+    return (
+      <>
+        <Titulo>En vivo</Titulo>
+        <Aviso tipo="error">{error}</Aviso>
+        <button type="button" className="boton boton--primario" onClick={() => void recargar()}>
+          Reintentar
+        </button>
+      </>
+    );
+
   if (!termo)
     return (
       <div className="vacio-grande">
-        <Titulo>Aún no registras tu termo</Titulo>
+        <Titulo>{supervisor ? 'Aún no hay termos' : 'Aún no tienes un termo vinculado'}</Titulo>
         <p className="subtitulo">
-          Registra el termo, el código de su sensor y las vacunas que lleva para ver su temperatura en vivo.
+          {supervisor
+            ? 'Registra el termo con el código que envía su sensor y entrega la clave a la enfermera que lo llevará.'
+            : 'Vincula el termo que llevas con el código y la clave impresos en su etiqueta para ver su temperatura en vivo.'}
         </p>
-        <Link to="/termo" className="boton boton--primario boton--grande">
-          Registrar termo
+        <Link to="/termos" className="boton boton--primario boton--grande">
+          {supervisor ? 'Registrar termo' : 'Vincular termo'}
         </Link>
       </div>
     );
 
-  const estado = estadoTemperatura(ultima?.temperatura, termo);
+  const rango = rangoDe(termo);
+  const estado = estadoTemperatura(ultima?.temperatura, rango);
   const sinSenal = !ultima || ahora - ultima.t > MS_SENSOR_SIN_SENAL;
   const clave: ClaveEstado = sinSenal ? 'sin_senal' : estado;
-  const porVencer = lotes.filter((l) => estadoLote(l, DIAS_POR_VENCER) === 'por_vencer').length;
-  const noUsables = lotes.filter((l) => ['vencido', 'no_apto'].includes(estadoLote(l, DIAS_POR_VENCER))).length;
+  const abiertasDelTermo = alertasAbiertas.filter((a) => a.contenedor === termo.contenedor);
+  const proximo = termo.nextExpiry;
 
   return (
     <>
@@ -99,7 +117,7 @@ export function EnVivo() {
               <span>{TEXTO_CONEXION[estadoSensor]}</span>
             )}
             <span className="hero__termo">
-              {termo.nombre} · sensor {termo.contenedor}
+              {nombreTermo(termo)} · código {termo.contenedor}
             </span>
           </p>
 
@@ -113,12 +131,16 @@ export function EnVivo() {
           </div>
           <p className="hero__estado">{sinSenal ? 'Sensor sin señal' : TEXTO_ESTADO_TEMPERATURA[estado]}</p>
 
-          <BarraRango temp={sinSenal ? null : ultima?.temperatura} min={termo.min} max={termo.max} />
+          <BarraRango temp={sinSenal ? null : ultima?.temperatura} min={rango.minTemp} max={rango.maxTemp} />
 
           <dl className="hero__datos">
             <div>
               <dt>Rango seguro</dt>
-              <dd>{formatoRango(termo.min, termo.max)}</dd>
+              <dd title={textoRango(rango)}>{formatoRango(rango.minTemp, rango.maxTemp)}</dd>
+            </div>
+            <div>
+              <dt>Calculado con</dt>
+              <dd>{rango.basedOn === 'LOTS' ? 'Los lotes del termo' : (rango.profileName ?? 'Perfil estándar')}</dd>
             </div>
             <div>
               <dt>Humedad</dt>
@@ -129,22 +151,13 @@ export function EnVivo() {
               <dd title={ultima ? formatoFechaHora(ultima.t) : undefined}>{ultima ? haceCuanto(ahora - ultima.t) : 'Aún no llegan lecturas'}</dd>
             </div>
           </dl>
-
-          {termo.vacunas.length > 0 && (
-            <ul className="hero__vacunas" aria-label="Vacunas que lleva">
-              {termo.vacunas.map((v, i) => (
-                <Aparecer as="li" key={v.nombre} orden={i + 2}>
-                  {v.nombre}
-                </Aparecer>
-              ))}
-            </ul>
-          )}
         </div>
       </section>
 
-      {termo.vacunas.length === 0 && (
-        <Aviso tipo="alerta">
-          Tu termo no tiene vacunas registradas. <Link to="/termo">Agrégalas</Link> para que las alarmas usen su rango.
+      {termo.activeLots === 0 && (
+        <Aviso tipo="info">
+          El termo no tiene lotes registrados: las alarmas usan el rango {formatoRango(rango.minTemp, rango.maxTemp)}.{' '}
+          <Link to="/lotes">Registra sus lotes</Link> para que el rango se ajuste a las vacunas que lleva.
         </Aviso>
       )}
 
@@ -156,7 +169,7 @@ export function EnVivo() {
               Ver todas
             </Link>
           </div>
-          {alertasAbiertas.length === 0 ? (
+          {abiertasDelTermo.length === 0 ? (
             <p className="vacio vacio--ok">
               <span className="vacio__icono" aria-hidden="true">
                 ✓
@@ -165,14 +178,14 @@ export function EnVivo() {
             </p>
           ) : (
             <ol className="linea-tiempo linea-tiempo--compacta">
-              {alertasAbiertas.slice(0, 4).map((a, i) => (
+              {abiertasDelTermo.slice(0, 4).map((a, i) => (
                 <Aparecer
                   as="li"
                   key={a.id}
                   orden={i}
                   className={`linea-tiempo__item linea-tiempo__item--${a.status.toLowerCase()}${a.severity === 'CRITICAL' ? ' linea-tiempo__item--critica' : ''}`}
                 >
-                  <strong>{TEXTO_TIPO_ALERTA[a.type]}</strong>
+                  <strong>{a.title || textoTipo(a.type)}</strong>
                   <span className="linea-tiempo__meta">
                     {TEXTO_ESTADO_ALERTA[a.status]} · desde {formatoFechaHora(a.startedAt)}
                   </span>
@@ -189,29 +202,31 @@ export function EnVivo() {
               Ver lotes
             </Link>
           </div>
-          {lotes.length === 0 ? (
-            <p className="vacio">Aún no registras lotes en el termo.</p>
+          {termo.activeLots === 0 && termo.expiredLots === 0 ? (
+            <p className="vacio">Aún no hay lotes registrados en el termo.</p>
           ) : (
-            <div className="cifras">
-              <div className="cifra cifra--alerta">
-                <span className="cifra__valor">
-                  <Numero valor={porVencer} />
-                </span>
-                <span className="cifra__nombre">por vencer en {DIAS_POR_VENCER} días</span>
+            <>
+              <div className="cifras">
+                <div className="cifra">
+                  <span className="cifra__valor">
+                    <Numero valor={termo.activeLots} />
+                  </span>
+                  <span className="cifra__nombre">lotes en el termo</span>
+                </div>
+                <div className="cifra cifra--peligro">
+                  <span className="cifra__valor">
+                    <Numero valor={termo.expiredLots} />
+                  </span>
+                  <span className="cifra__nombre">vencidos por descartar</span>
+                </div>
               </div>
-              <div className="cifra cifra--peligro">
-                <span className="cifra__valor">
-                  <Numero valor={noUsables} />
-                </span>
-                <span className="cifra__nombre">vencidos o no aptos</span>
-              </div>
-              <div className="cifra">
-                <span className="cifra__valor">
-                  <Numero valor={lotes.length} />
-                </span>
-                <span className="cifra__nombre">lotes en el termo</span>
-              </div>
-            </div>
+              {proximo && (
+                <p className={proximo.daysToExpiry <= DIAS_POR_VENCER ? 'texto-peligro' : undefined}>
+                  Vence primero: <strong>{proximo.vaccine}</strong> lote {proximo.lotNumber}, el{' '}
+                  {formatoFecha(proximo.expiryDate)}.
+                </p>
+              )}
+            </>
           )}
         </Seccion>
       </div>
@@ -224,7 +239,7 @@ export function EnVivo() {
           </Link>
         </div>
         {serie.length > 1 ? (
-          <GraficoTemperatura puntos={serie} min={termo.min} max={termo.max} />
+          <GraficoTemperatura puntos={serie} min={rango.minTemp} max={rango.maxTemp} />
         ) : (
           <p className="vacio">Todavía no hay suficientes lecturas para el gráfico.</p>
         )}

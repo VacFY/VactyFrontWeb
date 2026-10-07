@@ -1,30 +1,63 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ApiError, configurarNoAutorizado, esErrorDeConexion } from '../api/http';
-import { cerrarSesion, iniciarSesion, obtenerPerfil, registrarse } from '../api/servicios';
+import { actualizarPerfil, cerrarSesion, iniciarSesion, obtenerPerfil, registrarse } from '../api/servicios';
+import type { Perfil, Rol } from '../api/tipos';
 import { borrar, guardar, leer } from '../lib/storage';
+
+interface Usuario {
+  dni: string;
+  rol: Rol;
+  /** Nombre y apellido; null si aún no completó su perfil. */
+  nombre: string | null;
+  perfilCompleto: boolean;
+}
 
 type EstadoSesion =
   | { tipo: 'cargando' }
   | { tipo: 'anonimo' }
   /** sinVerificar = sin conexión con el servidor; se usa la última sesión conocida. */
-  | { tipo: 'autenticado'; dni: string; sinVerificar: boolean };
+  | ({ tipo: 'autenticado'; sinVerificar: boolean } & Usuario);
+
+export interface DatosPersona {
+  nombre: string;
+  apellido: string;
+  establecimiento: string;
+}
 
 interface SesionCtx {
   sesion: EstadoSesion;
   ingresar(dni: string, contrasena: string): Promise<void>;
-  crearCuenta(dni: string, contrasena: string): Promise<void>;
+  crearCuenta(dni: string, contrasena: string, datos: DatosPersona): Promise<void>;
+  guardarDatos(datos: DatosPersona): Promise<void>;
   salir(): Promise<void>;
 }
 
 const Contexto = createContext<SesionCtx | null>(null);
 const CLAVE_SESION = 'sesion';
 
+/** El backend crea el perfil con "Undefined" en nombre, apellido y empresa. */
+export function textoPerfil(valor: string | null | undefined): string {
+  const v = (valor ?? '').trim();
+  return v.toLowerCase() === 'undefined' ? '' : v;
+}
+
+export function usuarioDesdePerfil(p: Perfil): Usuario {
+  const nombre = textoPerfil(p.profileName);
+  const apellido = textoPerfil(p.profileLastName);
+  return {
+    dni: p.profileDni,
+    rol: p.role === 'SUPERVISOR' ? 'SUPERVISOR' : 'ENFERMERA',
+    nombre: [nombre, apellido].filter(Boolean).join(' ') || null,
+    perfilCompleto: Boolean(nombre && apellido && textoPerfil(p.profileCompany)),
+  };
+}
+
 export function SesionProvider({ children }: { children: ReactNode }) {
   const [sesion, setSesion] = useState<EstadoSesion>({ tipo: 'cargando' });
 
-  const marcarAutenticado = useCallback((dni: string) => {
-    guardar(CLAVE_SESION, { dni });
-    setSesion({ tipo: 'autenticado', dni, sinVerificar: false });
+  const marcarAutenticado = useCallback((usuario: Usuario) => {
+    guardar(CLAVE_SESION, usuario);
+    setSesion({ tipo: 'autenticado', sinVerificar: false, ...usuario });
   }, []);
 
   const marcarAnonimo = useCallback(() => {
@@ -32,14 +65,35 @@ export function SesionProvider({ children }: { children: ReactNode }) {
     setSesion({ tipo: 'anonimo' });
   }, []);
 
+  /** Lee el perfil (rol y nombre). Sin perfil (404), se queda con lo conocido. */
+  const cargarPerfil = useCallback(
+    async (dni: string) => {
+      try {
+        marcarAutenticado(usuarioDesdePerfil(await obtenerPerfil()));
+      } catch (e) {
+        if (!(e instanceof ApiError && e.status === 404)) throw e;
+        const guardada = leer<Partial<Usuario> | null>(CLAVE_SESION, null);
+        marcarAutenticado({ dni, rol: guardada?.rol ?? 'ENFERMERA', nombre: null, perfilCompleto: false });
+      }
+    },
+    [marcarAutenticado],
+  );
+
   const verificar = useCallback(async () => {
-    const guardada = leer<{ dni: string } | null>(CLAVE_SESION, null);
+    const guardada = leer<Partial<Usuario> | null>(CLAVE_SESION, null);
+    const conocida: Usuario | null = guardada?.dni
+      ? {
+          dni: guardada.dni,
+          rol: guardada.rol ?? 'ENFERMERA',
+          nombre: guardada.nombre ?? null,
+          perfilCompleto: guardada.perfilCompleto ?? false,
+        }
+      : null;
     try {
-      const perfil = await obtenerPerfil();
-      marcarAutenticado(perfil.profileDni);
+      marcarAutenticado(usuarioDesdePerfil(await obtenerPerfil()));
     } catch (e) {
-      if (e instanceof ApiError && e.status === 404 && guardada) marcarAutenticado(guardada.dni);
-      else if (esErrorDeConexion(e) && guardada) setSesion({ tipo: 'autenticado', dni: guardada.dni, sinVerificar: true });
+      if (e instanceof ApiError && e.status === 404 && conocida) marcarAutenticado(conocida);
+      else if (esErrorDeConexion(e) && conocida) setSesion({ tipo: 'autenticado', sinVerificar: true, ...conocida });
       else marcarAnonimo();
     }
   }, [marcarAutenticado, marcarAnonimo]);
@@ -66,11 +120,21 @@ export function SesionProvider({ children }: { children: ReactNode }) {
       sesion,
       async ingresar(dni, contrasena) {
         await iniciarSesion(dni, contrasena);
-        marcarAutenticado(dni);
+        await cargarPerfil(dni);
       },
-      async crearCuenta(dni, contrasena) {
+      async crearCuenta(dni, contrasena, datos) {
         await registrarse(dni, contrasena);
-        marcarAutenticado(dni);
+        try {
+          await actualizarPerfil(datos.nombre, datos.apellido, datos.establecimiento);
+        } catch {
+          // la cuenta ya existe: si falla, la app le pide completar sus datos después
+        }
+        await cargarPerfil(dni);
+      },
+      async guardarDatos(datos) {
+        if (sesion.tipo !== 'autenticado') return;
+        await actualizarPerfil(datos.nombre, datos.apellido, datos.establecimiento);
+        await cargarPerfil(sesion.dni);
       },
       async salir() {
         try {
@@ -80,7 +144,7 @@ export function SesionProvider({ children }: { children: ReactNode }) {
         }
       },
     }),
-    [sesion, marcarAutenticado, marcarAnonimo],
+    [sesion, cargarPerfil, marcarAnonimo],
   );
 
   return <Contexto.Provider value={valor}>{children}</Contexto.Provider>;
@@ -92,9 +156,18 @@ export function useSesion(): SesionCtx {
   return ctx;
 }
 
-/** DNI del usuario con sesión. Solo para pantallas protegidas. */
-export function useDni(): string {
+/** Usuario con sesión. Solo para pantallas protegidas. */
+export function useUsuario(): Usuario {
   const { sesion } = useSesion();
   if (sesion.tipo !== 'autenticado') throw new Error('No hay sesión activa');
-  return sesion.dni;
+  return sesion;
+}
+
+/** DNI del usuario con sesión. Solo para pantallas protegidas. */
+export function useDni(): string {
+  return useUsuario().dni;
+}
+
+export function useEsSupervisor(): boolean {
+  return useUsuario().rol === 'SUPERVISOR';
 }

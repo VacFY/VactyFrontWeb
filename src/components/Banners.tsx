@@ -3,11 +3,12 @@ import { Link } from 'react-router-dom';
 import { mensajeDeError } from '../api/http';
 import { useTermo } from '../context/TermoContext';
 import { useTiempoReal } from '../context/TiempoRealContext';
-import { guiaAlerta, TEXTO_TIPO_ALERTA } from '../lib/alertas';
+import { guiaAlerta, suenaSirena, textoTipo } from '../lib/alertas';
 import { formatoFechaHora } from '../lib/format';
 import { useEnLinea } from '../lib/hooks';
 import { SIGLAS, siglasEnTexto } from '../lib/siglas';
 import { audioDisponible } from '../lib/sonido';
+import { rangoDe } from '../lib/termo';
 
 /** Aviso de modo sin internet y de sincronización al volver la conexión. */
 export function BannerConexion() {
@@ -60,7 +61,7 @@ export function BannerConexion() {
 /** Alarma visible en todas las pantallas mientras haya una alerta activa sin ver. */
 export function BannerAlarma() {
   const { alarma, marcarVista, sonido, cambiarSonido } = useTiempoReal();
-  const { termo } = useTermo();
+  const { termos } = useTermo();
   const [enviando, setEnviando] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,6 +69,9 @@ export function BannerAlarma() {
 
   if (!alarma) return null;
   const critica = alarma.severity === 'CRITICAL';
+  const rango = rangoDe(termos.find((t) => t.contenedor === alarma.contenedor));
+  const guia = guiaAlerta(alarma, rango.minTemp);
+  const sirena = suenaSirena(alarma);
 
   async function marcar() {
     if (!alarma) return;
@@ -89,13 +93,15 @@ export function BannerAlarma() {
           <span className="alarma__icono" aria-hidden="true">
             !
           </span>
-          {critica ? 'ALERTA CRÍTICA' : 'ALERTA'} · {TEXTO_TIPO_ALERTA[alarma.type]}
+          {critica ? 'ALERTA CRÍTICA' : 'ALERTA'} · {alarma.title || textoTipo(alarma.type)}
         </p>
         <p className="alarma__mensaje">{alarma.message}</p>
-        <p className="alarma__guia">
-          <strong>Qué hacer:</strong> {guiaAlerta(alarma, termo?.min ?? 2)}
-        </p>
-        {sonido && !audioDisponible() && (
+        {guia && (
+          <p className="alarma__guia">
+            <strong>Qué hacer:</strong> {guia}
+          </p>
+        )}
+        {sirena && sonido && !audioDisponible() && (
           <p className="alarma__nota">Toca cualquier parte de la pantalla para que suene la alarma.</p>
         )}
         {siglasEnTexto(alarma.message).map((s) => (
@@ -109,9 +115,11 @@ export function BannerAlarma() {
         <button type="button" className="boton boton--claro" onClick={marcar} disabled={enviando}>
           {enviando ? 'Enviando…' : 'Marcar como vista'}
         </button>
-        <button type="button" className="boton boton--borde-claro" onClick={() => cambiarSonido(!sonido)}>
-          {sonido ? 'Silenciar sonido' : 'Activar sonido'}
-        </button>
+        {sirena && (
+          <button type="button" className="boton boton--borde-claro" onClick={() => cambiarSonido(!sonido)}>
+            {sonido ? 'Silenciar sonido' : 'Activar sonido'}
+          </button>
+        )}
         <Link to="/alertas" className="boton boton--borde-claro">
           Ver alertas
         </Link>

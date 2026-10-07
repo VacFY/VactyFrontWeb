@@ -1722,6 +1722,142 @@ input[type='file']::file-selector-button {
   }
 }
 
+/* ── Termos vinculados ──────────────────────────────────────── */
+.cabecera__selector {
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--marron);
+  background: var(--blanco);
+  border: 1px solid var(--marron-linea);
+  border-radius: 999px;
+  padding: 0.3rem 0.75rem;
+  max-width: 14rem;
+}
+.cabecera__usuario {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  font-size: 0.85rem;
+  text-decoration: none;
+  max-width: 10rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.cabecera__usuario small {
+  color: var(--marron-60);
+  font-weight: 600;
+  font-size: 0.72rem;
+}
+@media (max-width: 900px) {
+  .cabecera__usuario {
+    display: none;
+  }
+}
+.aviso-cerrable {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.aviso-cerrable .aviso {
+  flex: 1 1 20rem;
+}
+.aviso__linea {
+  display: block;
+}
+.termo-fila {
+  padding: 1.75rem 0;
+  border-bottom: 1px solid var(--marron-linea);
+}
+.termo-fila--alerta .lote__cabecera h2 {
+  color: var(--peligro);
+}
+.evento__termo {
+  color: var(--marron-60);
+}
+.evento__lotes {
+  margin: 0 0 0.75rem;
+  padding-left: 1.1rem;
+}
+.cuidados {
+  margin: 0 0 1rem;
+}
+.cuidados ul {
+  margin: 0.25rem 0 0.5rem;
+  padding-left: 1.1rem;
+}
+.lote__sin-vvm {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 2px dashed var(--marron-linea);
+  color: var(--marron-60);
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+.asignaciones {
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0 0;
+}
+.asignaciones li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+  padding: 0.55rem 0;
+  border-top: 1px solid var(--marron-linea);
+}
+.asignaciones__fechas {
+  color: var(--marron-60);
+  font-size: 0.9rem;
+}
+.clave-termo__aviso {
+  font-weight: 800;
+  color: var(--peligro);
+}
+.clave-termo__etiqueta {
+  display: inline-block;
+  padding: 1.25rem 1.5rem;
+  margin: 0 0 1rem;
+  border: 2px solid var(--marron);
+  border-radius: 14px;
+  background: var(--blanco);
+}
+.clave-termo__nombre {
+  font-weight: 800;
+  font-size: 1.15rem;
+  margin-bottom: 0.4rem;
+}
+.clave-termo__dato {
+  margin: 0;
+  font-size: 1.05rem;
+}
+.clave-termo__clave {
+  font-size: 2.2rem;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+}
+/* Al imprimir, solo sale la etiqueta del termo. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .clave-termo__etiqueta,
+  .clave-termo__etiqueta * {
+    visibility: visible;
+  }
+  .clave-termo__etiqueta {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

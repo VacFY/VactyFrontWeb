@@ -1,129 +1,192 @@
 import { describe, expect, it } from 'vitest';
+import { motivoDelServidor } from '../api/http';
+import type { Alerta, LoteApi, Vacuna } from '../api/tipos';
+import { usuarioDesdePerfil } from '../context/SesionContext';
+import { guiaAlerta, suenaSirena } from './alertas';
 import { agruparPorIntervalo, resumirHistorial } from './lecturas';
-import { estadoLote, lotesUsarPrimero, ordenarFefo, validarLote, verificarLote, type Lote } from './lotes';
-import { codificarDireccion, decodificarDireccion, estadoTemperatura, nombrePerfil, vacunasDesdePerfil, type VacunaTermo } from './termo';
-import { validarContrasena, validarDni, validarNuevaVacuna, validarRango } from './validacion';
+import { estadoLote, lotesUsarPrimero, ordenarFefo, SIN_DATOS_LOCALES, validarLote, verificarLote } from './lotes';
+import { estadoTemperatura, RANGO_POR_DEFECTO, separarQr, validarClave, validarCodigoTermo } from './termo';
+import { validarContrasena, validarDni, validarTextoPerfil } from './validacion';
 
-const penta: VacunaTermo = { nombre: 'Pentavalente', min: 2, max: 8, sensibleCongelacion: true };
-const neumo: VacunaTermo = { nombre: 'Neumococo conjugada', min: 2, max: 8, sensibleCongelacion: true };
-
-describe('vacunas del termo', () => {
-  it('acepta dos vacunas con el mismo rango', () => {
-    expect(validarNuevaVacuna(neumo, [penta])).toBeNull();
+describe('termos', () => {
+  it('separa el código y la clave del QR del termo', () => {
+    expect(separarQr('vacty:001:K75NGJ')).toEqual({ codigo: '001', clave: 'K75NGJ' });
+    expect(separarQr('  VACTY:termo-2:k7p-29q ')).toEqual({ codigo: 'termo-2', clave: 'k7p-29q' });
+    expect(separarQr('001')).toBeNull();
+    expect(separarQr('https://vacty.pe/001')).toBeNull();
   });
 
-  it('rechaza una vacuna con otro rango y explica el motivo', () => {
-    const otra = { nombre: 'Varicela', min: -50, max: -15, sensibleCongelacion: false };
-    const error = validarNuevaVacuna(otra, [penta]);
-    expect(error).toContain('Varicela');
-    expect(error).toContain('Pentavalente');
-    expect(error).toContain('mismo rango');
+  it('valida el código y la clave antes de enviarlos', () => {
+    expect(validarCodigoTermo('001')).toBeNull();
+    expect(validarCodigoTermo('termo_A-1')).toBeNull();
+    expect(validarCodigoTermo('')).not.toBeNull();
+    expect(validarCodigoTermo('con espacio')).not.toBeNull();
+    expect(validarCodigoTermo('x'.repeat(33))).not.toBeNull();
+    expect(validarClave('K7P-29Q')).toBeNull();
+    expect(validarClave(' - ')).not.toBeNull();
   });
 
-  it('rechaza un rango que difiere solo en el máximo', () => {
-    expect(validarNuevaVacuna({ ...neumo, max: 7.5 }, [penta])).not.toBeNull();
-  });
-
-  it('rechaza vacunas repetidas sin importar mayúsculas', () => {
-    expect(validarNuevaVacuna({ ...penta, nombre: 'pentavalente' }, [penta])).toContain('ya está');
-  });
-
-  it('valida el rango de temperatura', () => {
-    expect(validarRango('2', '8')).toMatchObject({ min: 2, max: 8, errorMin: undefined, errorMax: undefined });
-    expect(validarRango('8', '2').errorMax).toBeTruthy();
-    expect(validarRango('', '8').errorMin).toBeTruthy();
-    expect(validarRango('2,5', '8').min).toBe(2.5);
-    expect(validarRango('2.55', '8').errorMin).toBeTruthy();
-    expect(validarRango('-60', '8').errorMin).toBeTruthy();
-  });
-
-  it('recupera las vacunas desde el perfil guardado en el backend', () => {
-    const nombre = nombrePerfil([penta, neumo], 2, 8);
-    const vacunas = vacunasDesdePerfil({ id: 3, name: `${nombre} #2`, minTemp: 2, maxTemp: 8, freezeSensitive: true });
-    expect(vacunas.map((v) => v.nombre)).toEqual(['Pentavalente', 'Neumococo conjugada']);
-    expect(vacunasDesdePerfil({ id: 1, name: 'PAI estándar 2–8 °C', minTemp: 2, maxTemp: 8, freezeSensitive: true })).toEqual([]);
-  });
-
-  it('codifica el contenedor y el perfil en el dispositivo', () => {
-    expect(decodificarDireccion(codificarDireccion('001', 7))).toEqual({ contenedor: '001', profileId: 7 });
-    expect(decodificarDireccion('192.168.1.50')).toEqual({ contenedor: '192.168.1.50', profileId: null });
-  });
-
-  it('distingue congelación de calor', () => {
-    const rango = { min: 2, max: 8, sensibleCongelacion: true };
-    expect(estadoTemperatura(1, rango)).toBe('congelacion');
-    expect(estadoTemperatura(1, { ...rango, sensibleCongelacion: false })).toBe('bajo');
-    expect(estadoTemperatura(9, rango)).toBe('alto');
-    expect(estadoTemperatura(5, rango)).toBe('ok');
-    expect(estadoTemperatura(null, rango)).toBe('sin_dato');
+  it('distingue congelación de calor con el rango del backend', () => {
+    expect(estadoTemperatura(1, RANGO_POR_DEFECTO)).toBe('congelacion');
+    expect(estadoTemperatura(1, { ...RANGO_POR_DEFECTO, freezeSensitive: false })).toBe('bajo');
+    expect(estadoTemperatura(9, RANGO_POR_DEFECTO)).toBe('alto');
+    expect(estadoTemperatura(5, RANGO_POR_DEFECTO)).toBe('ok');
+    expect(estadoTemperatura(null, RANGO_POR_DEFECTO)).toBe('sin_dato');
   });
 });
 
-describe('acceso', () => {
-  it('valida DNI y contraseña', () => {
+describe('sesión y errores', () => {
+  it('lee el rol y trata "Undefined" como perfil incompleto', () => {
+    const nuevo = usuarioDesdePerfil({
+      profileDni: '22222222',
+      profileName: 'Undefined',
+      profileLastName: 'Undefined',
+      profileCompany: 'Undefined',
+      role: 'ENFERMERA',
+    });
+    expect(nuevo).toEqual({ dni: '22222222', rol: 'ENFERMERA', nombre: null, perfilCompleto: false });
+    const sup = usuarioDesdePerfil({
+      profileDni: '11111111',
+      profileName: 'Ana',
+      profileLastName: 'Quispe',
+      profileCompany: 'Microred',
+      role: 'SUPERVISOR',
+    });
+    expect(sup).toMatchObject({ rol: 'SUPERVISOR', nombre: 'Ana Quispe', perfilCompleto: true });
+  });
+
+  it('usa el motivo que envía el backend y lo ignora si no viene', () => {
+    expect(motivoDelServidor('{"status":403,"message":"No tiene acceso al termo 002: vincúlelo primero con su clave."}')).toBe(
+      'No tiene acceso al termo 002: vincúlelo primero con su clave.',
+    );
+    expect(motivoDelServidor('{"status":500,"error":"Internal Server Error"}')).toBeNull();
+    expect(motivoDelServidor('')).toBeNull();
+    expect(motivoDelServidor('<html>')).toBeNull();
+  });
+
+  it('valida DNI, contraseña y datos del perfil', () => {
     expect(validarDni('12345678')).toBeNull();
     expect(validarDni('1234567')).not.toBeNull();
     expect(validarContrasena('clave123')).toBeNull();
     expect(validarContrasena('corta1')).not.toBeNull();
     expect(validarContrasena('solotexto')).not.toBeNull();
     expect(validarContrasena('a1'.repeat(40))).not.toBeNull();
+    expect(validarTextoPerfil('Ana', 'nombre')).toBeNull();
+    expect(validarTextoPerfil('  ', 'nombre')).not.toBeNull();
+    expect(validarTextoPerfil('Undefined', 'nombre')).not.toBeNull();
+  });
+});
+
+const alerta = (p: Partial<Alerta>): Alerta => ({
+  id: 1,
+  contenedor: '001',
+  type: 'OUT_OF_RANGE',
+  severity: 'WARNING',
+  status: 'ACTIVE',
+  title: '',
+  message: '',
+  affectedLots: [],
+  lotId: null,
+  triggerValue: null,
+  minValue: null,
+  maxValue: null,
+  startedAt: '2026-10-07T12:00:00Z',
+  acknowledgedAt: null,
+  acknowledgedBy: null,
+  resolvedAt: null,
+  resolutionMessage: null,
+  ...p,
+});
+
+describe('alertas', () => {
+  it('la sirena suena por temperatura o sensor, no por vencimientos', () => {
+    expect(suenaSirena(alerta({ type: 'OUT_OF_RANGE' }))).toBe(true);
+    expect(suenaSirena(alerta({ type: 'SENSOR_OFFLINE' }))).toBe(true);
+    expect(suenaSirena(alerta({ type: 'LOT_EXPIRING', severity: 'CRITICAL' }))).toBe(false);
+    expect(suenaSirena(alerta({ type: 'LOT_EXPIRED', severity: 'CRITICAL' }))).toBe(false);
+    expect(suenaSirena(alerta({ type: 'OUT_OF_RANGE', status: 'ACKNOWLEDGED' }))).toBe(false);
+  });
+
+  it('da una guía para temperatura y ninguna para lotes o tipos nuevos', () => {
+    expect(guiaAlerta(alerta({ triggerValue: 1 }), 2)).toContain('paquetes fríos');
+    expect(guiaAlerta(alerta({ type: 'LOT_EXPIRED' }), 2)).toBeNull();
+    expect(guiaAlerta(alerta({ type: 'NUEVO_TIPO' as Alerta['type'] }), 2)).toBeNull();
   });
 });
 
 const HOY = '2026-10-07';
-const lote = (p: Partial<Lote>): Lote => ({
-  id: p.numero ?? 'x',
-  vacuna: 'Pentavalente',
-  numero: 'L1',
-  vencimiento: '2027-01-01',
-  frascos: 10,
-  etapaVvm: 1,
-  fotoVvm: null,
-  registradoEn: '2026-10-01T00:00:00Z',
-  verificaciones: [],
+const vacuna = (id: number, name: string): Vacuna => ({
+  id,
+  name,
+  protectsAgainst: null,
+  minTemp: 2,
+  maxTemp: 8,
+  freezeSensitive: true,
+  heatSensitive: false,
+  dosesPerVial: null,
+  notes: null,
+  verified: false,
+  careProfile: null,
+  careProfileLabel: null,
+  careInstructions: [],
+});
+const penta = vacuna(2, 'Pentavalente');
+const lote = (p: Partial<LoteApi>): LoteApi => ({
+  id: 1,
+  contenedor: '001',
+  vaccine: penta,
+  gtin: null,
+  lotNumber: 'L1',
+  expiryDate: '2027-01-01',
+  daysToExpiry: 86,
+  vials: 10,
+  doses: null,
+  source: 'MANUAL',
+  status: 'ACTIVE',
+  registeredBy: 'x',
+  registeredAt: '2026-10-01T00:00:00Z',
+  closedAt: null,
+  closeReason: null,
   ...p,
 });
 
 describe('lotes', () => {
-  const datos = { vacuna: 'Pentavalente', numero: 'ab-123', vencimiento: '2026-12-31', frascos: '10', etapaVvm: 1 as const };
-  const contexto = { vacunasTermo: ['Pentavalente'], lotes: [], hoy: HOY };
+  const datos = { vacunaId: '2', numero: 'ab-123', vencimiento: '2026-12-31', frascos: '10', dosis: '', etapaVvm: 1 as const };
 
-  it('acepta un lote válido', () => {
-    expect(validarLote(datos, contexto)).toEqual({});
+  it('acepta un lote válido y rechaza los datos imposibles', () => {
+    expect(validarLote(datos, HOY)).toEqual({});
+    expect(validarLote({ ...datos, vencimiento: '2026-10-06' }, HOY).vencimiento).toContain('vencido');
+    expect(validarLote({ ...datos, etapaVvm: 3 }, HOY).etapaVvm).toBeTruthy();
+    expect(validarLote({ ...datos, vacunaId: '' }, HOY).vacunaId).toBeTruthy();
+    expect(validarLote({ ...datos, frascos: '0' }, HOY).frascos).toBeTruthy();
+    expect(validarLote({ ...datos, dosis: '0' }, HOY).dosis).toBeTruthy();
+    expect(validarLote({ ...datos, numero: 'X'.repeat(21) }, HOY).numero).toBeTruthy();
   });
 
-  it('rechaza lotes vencidos, con VVM en descarte o de una vacuna que no está en el termo', () => {
-    expect(validarLote({ ...datos, vencimiento: '2026-10-06' }, contexto).vencimiento).toContain('vencido');
-    expect(validarLote({ ...datos, etapaVvm: 3 }, contexto).etapaVvm).toBeTruthy();
-    expect(validarLote({ ...datos, vacuna: 'Varicela' }, contexto).vacuna).toBeTruthy();
-    expect(validarLote({ ...datos, frascos: '0' }, contexto).frascos).toBeTruthy();
-  });
-
-  it('rechaza un lote repetido de la misma vacuna', () => {
-    const existentes = [lote({ numero: 'AB-123' })];
-    expect(validarLote(datos, { ...contexto, lotes: existentes }).numero).toBeTruthy();
-  });
-
-  it('clasifica por vencimiento y VVM', () => {
-    expect(estadoLote(lote({ vencimiento: '2026-10-06' }), 30, HOY)).toBe('vencido');
-    expect(estadoLote(lote({ vencimiento: '2026-10-07' }), 30, HOY)).toBe('por_vencer');
-    expect(estadoLote(lote({ vencimiento: '2026-11-06' }), 30, HOY)).toBe('por_vencer');
-    expect(estadoLote(lote({ vencimiento: '2026-11-07' }), 30, HOY)).toBe('vigente');
-    expect(estadoLote(lote({ etapaVvm: 4 }), 30, HOY)).toBe('no_apto');
+  it('clasifica por estado del backend, vencimiento y VVM local', () => {
+    expect(estadoLote(lote({ status: 'EXPIRED' }), SIN_DATOS_LOCALES, 30, HOY)).toBe('vencido');
+    expect(estadoLote(lote({ expiryDate: '2026-10-06' }), SIN_DATOS_LOCALES, 30, HOY)).toBe('vencido');
+    expect(estadoLote(lote({ expiryDate: '2026-11-06' }), SIN_DATOS_LOCALES, 30, HOY)).toBe('por_vencer');
+    expect(estadoLote(lote({ expiryDate: '2026-11-07' }), SIN_DATOS_LOCALES, 30, HOY)).toBe('vigente');
+    expect(estadoLote(lote({}), { ...SIN_DATOS_LOCALES, etapaVvm: 4 }, 30, HOY)).toBe('no_apto');
   });
 
   it('ordena por FEFO y marca el primero apto de cada vacuna', () => {
-    const a = lote({ numero: 'A', vencimiento: '2027-03-01' });
-    const b = lote({ numero: 'B', vencimiento: '2026-12-01' });
-    const vencido = lote({ numero: 'C', vencimiento: '2026-10-01' });
-    expect(ordenarFefo([a, b, vencido]).map((l) => l.numero)).toEqual(['C', 'B', 'A']);
-    expect([...lotesUsarPrimero([a, b, vencido], HOY)]).toEqual(['B']);
+    const a = lote({ id: 1, lotNumber: 'A', expiryDate: '2027-03-01' });
+    const b = lote({ id: 2, lotNumber: 'B', expiryDate: '2026-12-01' });
+    const c = lote({ id: 3, lotNumber: 'C', expiryDate: '2026-11-01' });
+    const vencidoLote = lote({ id: 4, lotNumber: 'D', expiryDate: '2026-10-01', status: 'EXPIRED' });
+    const otra = lote({ id: 5, lotNumber: 'H', vaccine: vacuna(3, 'Hepatitis B') });
+    expect(ordenarFefo([a, b, vencidoLote]).map((l) => l.lotNumber)).toEqual(['D', 'B', 'A']);
+    // C tiene el VVM en descarte en este equipo: se salta y se usa B.
+    const locales = { 3: { ...SIN_DATOS_LOCALES, etapaVvm: 3 as const } };
+    expect([...lotesUsarPrimero([a, b, c, vencidoLote, otra], locales, HOY)].sort()).toEqual([2, 5]);
   });
 
   it('la verificación bloquea frascos vencidos o con VVM en descarte', () => {
     expect(verificarLote(lote({}), 2, HOY).apto).toBe(true);
     expect(verificarLote(lote({}), 3, HOY).apto).toBe(false);
-    expect(verificarLote(lote({ vencimiento: '2026-10-01' }), 1, HOY).motivos).toHaveLength(1);
+    expect(verificarLote(lote({ status: 'EXPIRED' }), 1, HOY).motivos).toHaveLength(1);
   });
 });
 
