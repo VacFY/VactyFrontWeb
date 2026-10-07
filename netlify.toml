@@ -1,0 +1,23 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  # Vite 8 requiere Node 20.19+ o 22.12+.
+  NODE_VERSION = "22"
+  # Los WebSockets no pasan por el proxy de Netlify: van directo al backend.
+  VITE_WS_URL = "wss://vacfybackend.onrender.com"
+
+# REST: Netlify reenvía /api al backend. Así la cookie de sesión es del mismo sitio
+# (Safari y Firefox bloquean cookies de terceros).
+[[redirects]]
+  from = "/api/*"
+  to = "https://vacfybackend.onrender.com/api/:splat"
+  status = 200
+  force = true
+
+# Aplicación de una sola página: cualquier otra ruta abre index.html.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

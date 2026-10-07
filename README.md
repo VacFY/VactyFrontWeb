@@ -61,7 +61,7 @@ npm run preview    # sirve dist/ en http://localhost:8000 con el mismo proxy
 
 ## Desplegar
 
-1. Compilar con `npm run build` y publicar `dist/` (Vercel, Netlify o cualquier hosting estático).
+1. Compilar con `npm run build` y publicar `dist/`. En **Netlify** basta con conectar el repositorio: `netlify.toml` ya define el build, la versión de Node, `VITE_WS_URL` y el proxy de `/api`. En Vercel lo hace `vercel.json`.
 2. **REST**: el hosting debe reenviar `/api/*` al backend para que la cookie `access-token` sea del mismo sitio (Safari y Firefox bloquean cookies de terceros). `vercel.json` ya lo hace en Vercel.
 3. **WebSockets**: los hostings estáticos no los reenvían. Define `VITE_WS_URL=wss://vacfybackend.onrender.com` al compilar.
 4. **En el backend**, agrega el dominio del front a `ALLOWED_ORIGINS` (hoy solo acepta `http://localhost:8000`). Sin esto, el backend responde 403 a las peticiones y a los WebSockets.
